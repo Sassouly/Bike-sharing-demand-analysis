@@ -262,7 +262,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - Data source: Bike-sharing system historical records
 - Course: Linear Models - University Paris Dauphine-PSL
-- Special thanks to Professor Denis Pasquignon for guidance
 
 ## Contact
 
