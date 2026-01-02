@@ -1,0 +1,1211 @@
+---
+title: "Bike Sharing Demand Analysis - Linear and Generalized Linear Models"
+author: "Sacha Assouly"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    keep_tex: true
+    latex_engine: xelatex
+    number_sections: true
+  html_document:
+    df_print: paged
+fontsize: 12pt
+geometry: a4paper
+---
+
+# Introduction
+
+Bike-sharing services have become an increasingly popular urban mobility solution worldwide. These systems allow users to rent bikes at low cost and return them to dedicated stations. The integration of these services into route suggestions by applications like Google Maps in 2020 demonstrates their growing importance in modern transportation networks.
+
+As part of this project, we analyze historical data from a bike-sharing system. This data, collected on a daily basis, includes information such as weather conditions, seasonal characteristics, and other factors likely to influence rental behavior.
+
+The main objective is to determine both linear and generalized linear models to predict the number of bike rentals based on the available explanatory variables. These variables include weather conditions (temperature, humidity, wind), temporal periods (season, month, day of the week, time of day), and contextual indicators such as the presence of holidays or the nature of days (working days or not).
+
+We will examine the distributions of variables, their potential correlation, and possible multicollinearity problems. Particular attention will be paid to the selection of the final model, verification of its assumptions, and interpretation of coefficients. Finally, predictive performance will be evaluated using the Mean Squared Error (MSE) on a test set.
+
+This study aims not only to identify the most significant factors influencing bike rentals, but also to propose a rigorous methodological framework for analyzing data from similar systems.
+
+# Setup and Required Libraries
+
+The libraries loaded below will be used throughout the analysis. They cover needs in data manipulation, visualization, statistical analyses, and report generation.
+
+```{r setup, message=FALSE, warning=FALSE}
+library(car)
+library(dplyr)
+library(rmarkdown)
+library(kableExtra)
+library(ggplot2)
+library(GGally)
+library(plotly)
+library(MASS)
+library(gclus)
+library(gridExtra)
+library(cowplot)
+library(ggfortify) 
+library(knitr)
+library(rsample)
+library(corrplot)
+library(lmtest)
+library(vcdExtra)
+```
+
+```{r}
+set.seed(1234)
+```
+
+# Data Loading and Preprocessing
+
+```{r load_data}
+# Load the dataset
+D1 <- read.csv("projet.csv", header=TRUE, dec=",")
+
+# Select relevant columns
+D <- D1[,2:14]
+
+# Convert categorical variables to factors
+D$saison <- as.factor(D$saison)
+D$mois <- as.factor(D$mois)
+D$jour_mois <- as.factor(D$jour_mois)
+D$jour_semaine <- as.factor(D$jour_semaine)
+D$horaire <- as.factor(D$horaire)
+D$jour_travail <- as.factor(D$jour_travail)
+D$vacances <- as.factor(D$vacances)
+D$meteo <- as.factor(D$meteo)
+
+# Convert numeric variables
+D$humidite <- as.numeric(D$humidite)
+D$vent <- as.numeric(D$vent)
+D$temperature1 <- as.numeric(D$temperature1)
+D$temperature2 <- as.numeric(D$temperature2)
+
+# Split data into training (80%) and testing (20%) sets
+set.seed(12)
+projet_split <- rsample::initial_split(D, prop = 0.8)
+train <- rsample::training(projet_split)
+test <- rsample::testing(projet_split)
+
+str(train)
+summary(train)
+```
+
+**Comment:**  
+
+**Data Preprocessing:**  
+- Categorical variables (`saison`, `mois`, `jour_mois`, `jour_semaine`, `horaire`, `jour_travail`, `vacances`, `meteo`) are converted to factors to enable appropriate analysis of qualitative data.
+- Variables `humidite`, `vent`, `temperature1`, and `temperature2` are converted to numeric values to treat them as quantitative variables.
+
+**Data Splitting:**  
+- Data is split using stratified random sampling with the `rsample::initial_split` function.
+- Data is divided into a training set (`train` - 80% of data) and a test set (`test` - 20% of data).
+- The `set.seed(12)` function is used to ensure reproducibility of the random split.
+
+**Training Data Exploration:**  
+- The structure of the training data is displayed with `str(train)`, allowing verification of variable types.
+- A statistical summary of variables is generated with `summary(train)` to identify trends, missing values, and variable distributions.
+
+# Target Variable Transformation (for Linear Model approach)
+
+```{r transform_target}
+# Distribution of the original bike rental variable
+hist(D$velos, breaks = 20, main = "Distribution of Number of Bikes Rented", 
+     col = "lightblue", xlab = "Number of bikes")
+
+# Transformation of the target variable
+D$sqrt_velos <- sqrt(D$velos)
+train$sqrt_velos <- sqrt(train$velos)
+test$sqrt_velos <- sqrt(test$velos)
+
+# Verification of the distribution after transformation
+hist(D$sqrt_velos, breaks = 20, main = "Histogram of sqrt_velos", 
+     xlab = "sqrt(bikes)")
+qqnorm(D$sqrt_velos)
+qqline(D$sqrt_velos, col = "red")
+```
+
+**Comment:**
+
+**Target Variable Transformation:**  
+- The target variable (`velos`) does not follow a normal distribution, which could harm the effectiveness of linear regression.
+- To meet the normality assumption of linear regression, a transformation is applied to the target variable by taking the square root of `velos`.
+- This transformation makes the distribution of `velos` more symmetric and closer to a normal distribution, improving model fit.
+
+**Distribution Visualization Before and After Transformation:**  
+- A histogram of the transformed variable (`sqrt_velos`) is generated to observe the transformation's impact on the distribution. We notice that the transformed variable's distribution is closer to a Gaussian distribution.
+- A QQ-plot is also used to visually verify if the transformed variable's distribution approaches normality. This graph shows that our variable's distribution approximately follows the reference line (y = x), indicating better fit with a normal distribution.
+
+In the subsequent analysis, we will build our linear regression model using the transformed variable sqrt(velos), then at the end of the process, we will apply the necessary inverse transformations to calculate our performance metrics, such as MSE.
+
+# Data Visualization
+
+## Categorical Variables Frequency
+
+```{r categorical_freq, fig.height=10, fig.width=12}
+# Frequency of each modality for different factors
+cat_vars <- names(D)[sapply(D, is.factor)]
+par(mfrow = c(3, 3), mar = c(4, 4, 2, 1), oma = c(0, 0, 2, 0))
+for (var in cat_vars) {
+  barplot(table(D[[var]]), main = var, col = "lightgreen")
+}
+```
+
+## Temperature and Bike Rentals
+
+It seems quite natural to look at the evolution of bike rentals as a function of temperature.
+
+```{r temp_bikes, warning=FALSE}
+ggplot(train, aes(x = temperature1, y = velos)) +
+  geom_point(color = "royalblue", alpha = 0.6, size = 2, shape = 16) +
+  geom_smooth(method = "glm", formula = y ~ x, se = FALSE, color = "red", size = 1.2) +
+  labs(
+    title = "Relationship between Actual Temperature and Bikes Rented",
+    subtitle = "Analysis based on a GLM model",
+    x = "Actual Temperature (°C)",
+    y = "Number of Bikes Rented",
+    caption = "Source: Training data"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 16),
+    plot.subtitle = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12)
+  )
+```
+
+We observe a strong correlation between actual temperature and bike rentals, suggesting strong importance of temperature in explaining "bikes". Since this analysis proves conclusive, we can question the effect of temperature2 on our model. It is predictable that these two quantities are intimately linked; nevertheless, their differences may prove very interesting for model analysis.
+
+## Comparison of Two Temperature Variables
+
+```{r temp_comparison, warning=FALSE, message=FALSE}
+ggplot(data = train) +
+  geom_point(aes(x = temperature1, y = velos), color = "blue",
+             alpha = 0.6, size = 2, shape = 16) + 
+  geom_smooth(aes(x = temperature1, y = velos), method = "glm",
+              se = FALSE, color = "red", size = 1) + 
+  geom_point(aes(x = temperature2, y = velos), color = "green",
+             alpha = 0.6, size = 2, shape = 17) + 
+  geom_smooth(aes(x = temperature2, y = velos), method = "lm",
+              se = FALSE, color = "orange", size = 1) + 
+  scale_color_manual(
+    name = "Legend",
+    values = c("Temperature 1" = "blue", "Temperature 2" = "green")
+  ) +
+  labs(
+    x = "Temperature (°C)", 
+    y = "Number of Bikes", 
+    title = "Relationship between Temperature and Bike Rentals",
+    subtitle = "Analysis of actual (temperature1) and feels-like (temperature2) temperatures",
+    caption = "Data source: 'train' dataset"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    legend.title = element_blank()
+  )
+```
+
+**General Trend:** Both curves are relatively close, indicating that temperature1 and temperature2 are strongly correlated, although their effect on the number of bikes rented varies slightly. The variable temperature1 appears slightly more dispersed in bike rentals, which could reflect differences due to external factors (wind, humidity). The variable temperature2, on the other hand, shows a more homogeneous trend and a clearer correlation. The graph shows a positive correlation between temperature and bike rentals, with a slight difference between actual and feels-like temperatures. The results suggest that users are influenced by their perception of weather conditions, which could be interesting for improving demand forecasts in bike-sharing services. Additional analysis integrating other meteorological variables could refine these conclusions.
+
+## Monthly Distribution
+
+```{r monthly_dist}
+ggplot(train, aes(x = as.factor(mois), y = velos, fill = as.factor(mois))) +
+  geom_boxplot(alpha = 0.7, outlier.color = "red", outlier.shape = 1, width = 0.6) +
+  scale_fill_manual(
+    values = c("1" = "red", "2" = "orange", "3" = "yellow", "4" = "green", 
+               "5" = "blue", "6" = "purple", "7" = "brown", "8" = "pink", 
+               "9" = "cyan", "10" = "gold", "11" = "darkgreen", "12" = "gray"),
+    labels = c("January", "February", "March", "April", "May", "June", "July", "August", 
+               "September", "October", "November", "December")
+  ) +
+  labs(
+    title = "Distribution of Bike Rentals by Month",
+    subtitle = "Analysis of rental distribution by month",
+    x = "Month",
+    y = "Number of Bikes Rented",
+    fill = "Month",
+    caption = "Source: Training data"
+  ) +
+  scale_x_discrete(labels = c("1" = "Jan", "2" = "Feb", "3" = "Mar", 
+                              "4" = "Apr", "5" = "May", "6" = "Jun", 
+                              "7" = "Jul", "8" = "Aug", "9" = "Sep", 
+                              "10" = "Oct", "11" = "Nov", "12" = "Dec")) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "none"
+  )
+```
+
+Monthly variations in bike rentals are significant, indicating that user behavior changes based on the month. The month is a key factor in explaining fluctuations in bike rentals, with usage levels varying considerably from month to month.
+
+## Day of Week Distribution
+
+```{r weekday_dist}
+ggplot(train, aes(x = as.factor(jour_semaine), y = velos, fill = as.factor(jour_semaine))) +
+  geom_boxplot(alpha = 0.7, outlier.color = "red", outlier.shape = 1, width = 0.6) +
+  scale_fill_manual(
+    values = c("1" = "red", "2" = "orange", "3" = "yellow", "4" = "green", 
+               "5" = "blue", "6" = "purple", "7" = "brown"),
+    labels = c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+  ) +
+  labs(
+    title = "Distribution of Bike Rentals by Day of Week",
+    subtitle = "Analysis of rental distribution by day",
+    x = "Day of Week",
+    y = "Number of Bikes Rented",
+    fill = "Day",
+    caption = "Source: Training data"
+  ) +
+  scale_x_discrete(labels = c("1" = "Sun", "2" = "Mon", "3" = "Tue", 
+                              "4" = "Wed", "5" = "Thu", "6" = "Fri", 
+                              "7" = "Sat")) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "none" 
+  )
+```
+
+We notice that the day of the week does not have much effect on "bikes".
+
+## Day of Month Distribution
+
+```{r monthday_dist}
+ggplot(train, aes(x = as.factor(jour_mois), y = velos, fill = as.factor(jour_mois))) +
+  geom_boxplot(alpha = 0.7, outlier.color = "red", outlier.shape = 1, width = 0.6) +
+  scale_fill_viridis_d(option = "C", guide = "none") +  
+  labs(
+    title = "Distribution of Bike Rentals by Day of Month",
+    subtitle = "Analysis of variations by day",
+    x = "Day of Month",
+    y = "Number of Bikes Rented",
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 14),
+    axis.text.x = element_text(size = 10, angle = 45, hjust = 1),  
+    axis.text.y = element_text(size = 12),
+    legend.position = "none"  
+  )
+```
+
+We notice that the day of the month does not have much effect on "bikes".
+
+## Humidity Effect
+
+```{r humidity_effect, message=FALSE}
+ggplot(train, aes(x = humidite, y = velos)) +
+  geom_point(color = "blue", alpha = 0.6, size = 2, shape = 16) +
+  geom_smooth(method = "glm", se = FALSE, color = "yellow", size = 1.2) +
+  labs(
+    x = "Humidity",
+    y = "Number of Bikes",
+    title = "Relationship between Humidity and Bike Rentals",
+    subtitle = "Analysis based on a GLM model",
+    caption = "Data source: 'train' dataset"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "none"
+  )
+```
+
+**General Trend:** The yellow curve shows a slight downward trend. This suggests that, overall, an increase in humidity is associated with a progressive decrease in the number of bikes rented.
+
+This graph highlights a weak negative correlation between humidity and bike rentals. However, the strong dispersion of data shows that other variables must be taken into account to better understand variations in rentals. A multi-variable analysis could deepen these relationships.
+
+## Wind Effect
+
+```{r wind_effect, message=FALSE}
+ggplot(train, aes(x = vent, y = velos)) +
+  geom_point(color = "lightblue", alpha = 0.7, size = 2) +  
+  geom_smooth(method = "glm", se = FALSE, color = "purple", size = 1.2) +  
+  labs(
+    title = "Relationship between Wind and Bikes Rented",
+    x = "Wind Speed (km/h)",  
+    y = "Number of Bikes Rented",
+    caption = "Source: Training data"
+  ) +
+  theme_minimal(base_size = 12) +  
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"), 
+    axis.title = element_text(size = 14),  
+    axis.text = element_text(size = 12) 
+  )
+```
+
+**General Trend:** The purple curve indicates a very slightly positive relationship between wind speed and the number of bikes rented. However, this trend is almost flat, suggesting a weak or non-existent correlation.
+
+Wind does not appear to have a significant impact on bike rentals; however, its interaction can prove very interesting for the model.
+
+## Working Days and Temperature Interaction
+
+```{r workday_temp, message=FALSE, fig.width=10, fig.height=7}
+ggplot(train, aes(x = temperature1, y = velos, color = as.factor(jour_travail))) +
+  geom_point(alpha = 0.6, size = 1.5) +  
+  geom_smooth(method = "glm", se = FALSE, size = 1) + 
+  scale_color_manual(
+    values = c("1" = "greenyellow", "2" = "violet"),  
+    labels = c("No (working day)", "Yes (day off)")
+  ) +
+  labs(
+    title = "Evolution of Bike Rentals by Working Days and Temperature",
+    subtitle = "Comparison between working days and days off",
+    color = "Working Day",
+    x = "Temperature (°C)",  
+    y = "Number of Bikes Rented",
+  ) +
+  theme_minimal(base_size = 14) +  
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),  
+    plot.subtitle = element_text(hjust = 0.5, size = 14),  
+    axis.title = element_text(size = 14),  
+    axis.text = element_text(size = 12),  
+    legend.title = element_text(size = 14), 
+    legend.text = element_text(size = 12) 
+  )
+```
+
+**General Trends:** The trend curves show a positive correlation between temperature and bike rentals for both categories. The slope of the violet curve (days off) is higher than that of the green curve (working days), indicating that temperature influences rentals more on days off.
+
+This graph highlights clear differences in bike rental behavior between working days and days off. Days off show greater sensitivity to temperature, with more numerous rentals, particularly when temperature increases.
+
+## Weather and Temperature Interaction
+
+```{r weather_temp, message=FALSE, fig.width=10, fig.height=7}
+ggplot(train, aes(x = temperature1, y = velos, color = as.factor(meteo))) +
+  geom_point(alpha = 0.6, size = 2) +  
+  geom_smooth(method = "glm", se = FALSE, size = 1) +  
+  scale_color_manual(
+    values = c("1" = "purple", "2" = "orange", "3" = "green"),  
+    labels = c("Clear", "Cloudy/Foggy", "Rain/Snow")  
+  ) +
+  labs(
+    title = "Impact of Weather and Temperature on Bike Rentals",
+    subtitle = "Analysis of weather conditions",
+    color = "Weather",
+    x = "Temperature (°C)",  
+    y = "Number of Bikes Rented",
+    caption = "Source: Training data"
+  ) +
+  theme_minimal(base_size = 14) +  
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),  
+    plot.subtitle = element_text(hjust = 0.5, size = 14),  
+    axis.title = element_text(size = 14),  
+    axis.text = element_text(size = 12),  
+    legend.title = element_text(size = 14),  
+    legend.text = element_text(size = 12)  
+  )
+```
+
+**General Trends:** The purple curve (clear weather) shows a steeper slope than others, indicating a marked increase in rentals with temperature. Clear conditions (purple) are most favorable for bike rentals. The combination of pleasant weather and high temperature seems to encourage increased use. This graph emphasizes the importance of weather conditions and temperature in bike rental behavior.
+
+## Seasons and Temperature Interaction
+
+```{r season_temp, message=FALSE, fig.width=8, fig.height=7}
+ggplot(train, aes(x = temperature1, y = velos, color = as.factor(saison))) +
+  geom_point(alpha = 0.6, size = 2) +  
+  geom_smooth(method = "glm", se = FALSE, size = 1) +  
+  scale_color_manual(
+    values = c("1" = "blue", "2" = "green", "3" = "red", "4" = "coral4"),  
+    labels = c("Winter", "Spring", "Summer", "Fall")
+  ) +
+  labs(
+    title = "Impact of Seasons and Temperature on Bike Rentals",
+    subtitle = "Analysis of seasonal variations",
+    color = "Season",
+    x = "Temperature (°C)",  
+    y = "Number of Bikes Rented",
+    caption = "Source: Training data"
+  ) +
+  theme_minimal(base_size = 14) +  
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),  
+    plot.subtitle = element_text(hjust = 0.5, size = 14),  
+    axis.title = element_text(size = 14),  
+    axis.text = element_text(size = 12),  
+    legend.title = element_text(size = 14),  
+    legend.text = element_text(size = 12)  
+  )
+```
+
+This graph highlights a strong seasonal impact on the relationship between temperature and bike rentals. Summer dominates in terms of number of rentals, followed by spring and fall, while winter is the least favorable season.
+
+## Month and Temperature Interaction
+
+```{r month_temp, message=FALSE, fig.width=8, fig.height=6}
+ggplot(train, aes(x = temperature1, y = velos, color = as.factor(mois))) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_smooth(method = "glm", se = TRUE, color = "black", linetype = "dashed", size = 1) +  
+  scale_color_viridis_d(
+    option = "C",
+    name = "Month",
+    labels = c("January", "February", "March", "April", "May", "June",
+               "July", "August", "September", "October", "November", "December")
+  ) +
+  labs(
+    title = "Relationship between Temperature and Bikes Rented",
+    subtitle = "Data colored by month",
+    x = "Temperature (°C)",
+    y = "Number of Bikes Rented",
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12)
+  )
+```
+
+The interaction between month and temperature is essential, as rental volumes vary significantly by month for similar temperatures. The month modulates the effect of temperature on user behavior, thus improving prediction accuracy and reflecting real temporal variations.
+
+## Time of Day and Temperature Interaction
+
+```{r hourly_temp, message=FALSE, fig.width=10, fig.height=7}
+ggplot(train, aes(x = temperature1, y = velos, color = as.factor(horaire))) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_smooth(method = "glm", se = TRUE, color = "black", linetype = "dashed", size = 1) +  
+  scale_color_viridis_d(
+    option = "C",
+    name = "Time Slot",
+    labels = c("[00h-07h[", "[07h-11h[", "[11h-15h[", "[15h-19h[", "[19h-24h[")
+  ) +
+  labs(
+    title = "Relationship between Temperature, Time of Day and Bikes Rented",
+    subtitle = "Data colored by time slot",
+    x = "Temperature (°C)",
+    y = "Number of Bikes Rented",
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12)
+  )
+```
+
+The interaction between temperature and time of day is crucial to explaining variations in bike rentals. Moderate and high temperatures increase rentals, but this effect is amplified during peak hours (11h-19h), when demand is naturally stronger.
+
+## Heatmap: Weather and Time of Day Interaction
+
+```{r heatmap_weather_time}
+ggplot(train, aes(x = as.factor(horaire), y = as.factor(meteo), fill = velos)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(
+    low = "lightblue", high = "darkblue",
+    name = "Number of Bikes Rented"
+  ) +
+  scale_x_discrete(
+    labels = c("[00h-07h[", "[07h-11h[", "[11h-15h[", "[15h-19h[", "[19h-24h[")
+  ) +
+  scale_y_discrete(
+    labels = c("1" = "Clear", "2" = "Cloudy", "3" = "Rain")
+  ) +
+  labs(
+    title = "Interaction between Weather and Time of Day",
+    subtitle = "Combined impact on bike rentals",
+    x = "Time Slot",
+    y = "Weather Conditions",
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 14),
+    axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12)
+  )
+```
+
+## Heatmap: Month and Time of Day Interaction
+
+```{r heatmap_month_time}
+ggplot(train, aes(x = as.factor(horaire), y = as.factor(mois), fill = velos)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(
+    low = "springgreen", high = "springgreen4",
+    name = "Number of Bikes Rented"
+  ) +
+  scale_x_discrete(
+    labels = c("[00h-07h[", "[07h-11h[", "[11h-15h[", "[15h-19h[", "[19h-24h[")
+  ) +
+  scale_y_discrete(
+    labels = c("1" = "January", "2" = "February", "3" = "March", "4" = "April",
+               "5" = "May", "6" = "June", "7" = "July", "8" = "August",
+               "9" = "September", "10" = "October", "11" = "November", "12" = "December")
+  ) +
+  labs(
+    title = "Interaction between Month and Time of Day",
+    subtitle = "Combined impact on bike rentals",
+    x = "Time Slot",
+    y = "Month",
+    caption = "Source: Training data"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 14),
+    axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12)
+  )
+```
+
+**First graph: Interaction between weather and time of day** - The effect of weather on rentals varies by time of day: clear conditions favor rentals in all time slots, but mainly between 11h-19h, while rain drastically reduces volumes, even during peak hours. This interaction emphasizes that time of day amplifies or attenuates the impact of weather conditions.
+
+**Second graph: Interaction between month and time of day** - The month modulates the effect of time of day on rentals: in summer, afternoon slots (11h-19h) see a peak in use, while in winter, volumes remain low regardless of time. This interaction shows that the impact of time of day strongly depends on the month.
+
+## Heatmap: Month and Weather Interaction
+
+```{r heatmap_month_weather}
+ggplot(train, aes(x = as.factor(meteo), y = as.factor(mois), fill = velos)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(
+    low = "mediumpurple1", high = "mediumpurple4",
+    name = "Number of Bikes Rented"
+  ) +
+  scale_x_discrete(
+    labels = c("1" = "Clear", "2" = "Cloudy", "3" = "Rain")
+  ) +
+  scale_y_discrete(
+    labels = c("1" = "January", "2" = "February", "3" = "March", "4" = "April",
+               "5" = "May", "6" = "June", "7" = "July", "8" = "August",
+               "9" = "September", "10" = "October", "11" = "November", "12" = "December")
+  ) +
+  labs(
+    title = "Interaction between Month and Weather",
+    subtitle = "Combined impact on bike rentals",
+    x = "Weather",
+    y = "Month",
+    caption = "Source: Training data"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 14),
+    axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12)
+  )
+```
+
+## Heatmap: Season and Weather Interaction
+
+```{r heatmap_season_weather}
+ggplot(train, aes(x = as.factor(meteo), y = as.factor(saison), fill = velos)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(
+    low = "navajowhite1", high = "navajowhite3",
+    name = "Number of Bikes Rented"
+  ) +
+  scale_x_discrete(
+    labels = c("1" = "Clear", "2" = "Cloudy", "3" = "Rain")
+  ) +
+  scale_y_discrete(
+    labels = c("1" = "Winter", "2" = "Spring", "3" = "Summer", "4" = "Fall")
+  ) +
+  labs(
+    title = "Interaction between Season and Weather",
+    subtitle = "Combined impact on bike rentals",
+    x = "Weather",
+    y = "Season",
+    caption = "Source: Training data"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 14),
+    axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12)
+  )
+```
+
+**First graph: Interaction between month and weather conditions** - The effect of months on bike rentals strongly depends on weather conditions: months like July and August record high volumes in clear weather, but rentals decrease considerably in rain, regardless of the period. This interaction shows that the impact of the month is modulated by weather conditions.
+
+**Second graph: Interaction between seasons and weather conditions** - Seasons amplify the impact of weather conditions: spring and summer fully benefit from clear conditions to maximize rentals, while winter, even with clear days, limits volumes. This interaction emphasizes a dependency between seasons and weather to explain demand.
+
+## Temperature and Humidity Interaction
+
+```{r temp_humidity, message=FALSE}
+ggplot(train, aes(x = temperature1, y = humidite, color = velos)) +
+  geom_point(alpha = 0.7, size = 2) +
+  geom_smooth(method = "lm", color = "black", linetype = "dashed", se = TRUE, size = 1) +
+  scale_color_gradient(
+    low = "lightblue", high = "darkblue",
+    name = "Number of Bikes Rented"
+  ) +
+  labs(
+    title = "Relationship between Humidity and Temperature",
+    subtitle = "Adding color to represent bikes rented",
+    x = "Temperature (°C)",
+    y = "Humidity (%)",
+    caption = "Source: Training data"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12)
+  )
+```
+
+The effect of temperature on rentals varies based on humidity level: at similar temperatures, moderate humidity conditions favor rentals, while extreme humidity levels (very low or very high) limit them. This interaction shows that these two variables act together to modulate demand.
+
+## Humidity and Season Interaction
+
+```{r humidity_season}
+ggplot(train, aes(x = humidite, y = velos, color = as.factor(saison))) +
+  geom_point(alpha = 0.7, size = 2) +
+  facet_wrap(~ as.factor(saison), labeller = labeller(
+    saison = c("1" = "Winter", "2" = "Spring", "3" = "Summer", "4" = "Fall")
+  )) +
+  scale_color_manual(
+    values = c("1" = "blue", "2" = "green", "3" = "yellow", "4" = "orange")
+  ) +
+  labs(
+    title = "Relationship between Humidity and Bikes Rented by Season",
+    x = "Humidity (%)",
+    y = "Number of Bikes Rented",
+    color = "Season",
+    caption = "Source: Training data"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12)
+  )
+```
+
+## Seasonal Distribution
+
+```{r season_boxplot}
+ggplot(train, aes(x = as.factor(saison), y = velos, fill = as.factor(saison))) +
+  geom_boxplot(alpha = 0.7, outlier.color = "red", outlier.shape = 1, width = 0.6) +
+  scale_fill_manual(
+    values = c("1" = "blue", "2" = "green", "3" = "yellow", "4" = "orange"),
+    labels = c("Winter", "Spring", "Summer", "Fall")
+  ) +
+  labs(
+    title = "Distribution of Bikes Rented by Season",
+    subtitle = "Analysis of seasonal variations",
+    x = "Season",
+    y = "Number of Bikes Rented",
+    fill = "Season",
+    caption = "Source: Training data"
+  ) +
+  scale_x_discrete(labels = c("1" = "Winter", "2" = "Spring", "3" = "Summer", "4" = "Fall")) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "none"
+  )
+```
+
+Summer is the season with the highest bike rentals, followed by fall, spring, and winter. This distribution highlights the importance of seasonal variation in demand.
+
+# Part 1: Linear Model (LM) Approach
+
+## MSE Calculation Function
+
+```{r mse_function}
+# Function to calculate MSE
+calculate_mse <- function(model, test_data) {
+  predictions <- predict(model, newdata = test_data)
+  
+  # Check if model uses sqrt transformation
+  if ("sqrt_velos" %in% all.vars(formula(model))) {
+    # Apply inverse transformation
+    predictions <- predictions^2
+    actual <- test_data$velos
+  } else {
+    actual <- test_data$velos
+  }
+  
+  mse <- mean((actual - predictions)^2)
+  return(mse)
+}
+```
+
+## Correlation Analysis
+
+```{r correlation_lm}
+# Correlation matrix for numeric variables
+numeric_vars <- train[, sapply(train, is.numeric)]
+cor_matrix <- cor(numeric_vars, use = "complete.obs")
+corrplot(cor_matrix, method = "color", type = "upper", 
+         tl.col = "black", tl.srt = 45, addCoef.col = "black", 
+         number.cex = 0.7)
+```
+
+**Comment:** We observe strong correlations between certain variables, particularly temperature variables and the target variable.
+
+## Initial Model with All Variables
+
+```{r initial_lm}
+# Initial model with all variables
+mod_complet <- lm(sqrt_velos ~ ., data = train)
+summary(mod_complet)
+
+cat("MSE of the complete model:", calculate_mse(mod_complet, test), "\n")
+```
+
+## Stepwise Selection
+
+```{r stepwise_lm}
+# Backward selection
+mod_backward <- step(mod_complet, direction = "backward", trace = 0)
+summary(mod_backward)
+
+# Forward selection
+mod0 <- lm(sqrt_velos ~ 1, data = train)
+mod_forward <- step(mod0, scope = formula(mod_complet), direction = "forward", trace = 0)
+summary(mod_forward)
+
+# Both directions selection
+mod_both <- step(mod0, scope = formula(mod_complet), direction = "both", trace = 0)
+summary(mod_both)
+
+cat("MSE Backward:", calculate_mse(mod_backward, test), "\n")
+cat("MSE Forward:", calculate_mse(mod_forward, test), "\n")
+cat("MSE Both:", calculate_mse(mod_both, test), "\n")
+```
+
+**Comment:** The stepwise selection methods help identify the most relevant variables. We compare the three approaches (backward, forward, both) to select the best model based on AIC and MSE.
+
+## Adding Interactions - Type 2 Method
+
+```{r interactions_type2}
+# Model with interactions based on visualization insights
+mod_both_full <- lm(sqrt_velos ~ saison + temperature2 + mois + temperature2:mois 
+                    + temperature2:saison + horaire * vacances + temperature2:vacances 
+                    + meteo + meteo:horaire + saison:horaire + humidite + meteo:humidite 
+                    + saison:humidite + vent + vent:meteo + horaire:mois 
+                    + horaire:temperature2 + mois:humidite + jour_semaine:temperature2, 
+                    data = train)
+
+summary(mod_both_full)
+
+# Type 2 ANOVA to test each interaction
+Anova(mod_both_full, type = 2)
+```
+
+**Comment:** We use Type 2 ANOVA (from the car package) to test the significance of each interaction while controlling for other variables in the model. This helps us identify which interactions truly contribute to model performance.
+
+## Final Linear Model Selection
+
+Based on Type 2 tests and visualization analysis, we select our final model:
+
+```{r final_lm}
+mod_final_lm <- lm(sqrt_velos ~ saison + temperature2 + mois + temperature2:mois 
+                   + temperature2:saison + horaire * vacances + meteo + meteo:horaire 
+                   + saison:horaire + humidite + meteo:humidite + saison:humidite 
+                   + vent + vent:meteo, data = train)
+
+summary(mod_final_lm)
+```
+
+**Comment:**
+
+The final model, `mod_final_lm`, is obtained after applying several selection and model comparison tests. Through previous steps where we compared the performance of different models (using criteria such as AIC, BIC, and adjusted R²), as well as adding interactions via the Type 2 method (ANOVA), we selected a model that accounts for complex relationships between variables.
+
+The interactions and variables included in this model are largely determined by exploratory analyses and graphs created initially. For example, interactions between `temperature2` and `mois`, as well as between `temperature2` and `saison`, are consistent with graph interpretation, which showed significant variations in the target variable according to these factors. Similarly, including variables like `horaire`, `vacances`, `meteo` and their interactions allows reflecting contextual and seasonal effects observed in the data.
+
+This final model is thus constructed consistently with initial observations and statistical test results, offering better understanding and prediction of the number of bikes rented in the sharing system.
+
+## Model Comparison with ANOVA
+
+```{r model_comparison_lm}
+anova(mod_both, mod_final_lm) 
+anova(mod_final_lm, mod_both_full) 
+```
+
+**Comment:**
+
+### Model Comparison with ANOVA
+
+We perform two ANOVA tests to compare models and evaluate the impact of added interactions. The first test compares the `mod_both` model with the final model to determine if additional interactions bring real benefit to the model. A p-value less than 0.05 and very small indicates that interactions have a significant effect, justifying the selection of the final model.
+
+The second test compares the final model with the `mod_both_full` model, which contains a higher number of interactions. Here, the p-value greater than 0.05 means we cannot reject H0, leading us to keep `mod_final_lm` as the selected model, despite the addition of numerous interactions in the `mod_both_full` model that do not add precision to our prediction model.
+
+```{r mse_final_lm}
+cat("MSE of our selected final LM model:", calculate_mse(mod_final_lm, test), "\n")
+```
+
+## Outlier Detection and Model Refinement
+
+```{r outlier_detection_lm}
+# Search for outliers and influential observations
+# Readjust the model by removing outliers to improve fit if necessary
+
+cook <- cooks.distance(mod_final_lm)
+high_cook <- which(cook > 4/nrow(train))
+
+train_clean <- train[-high_cook, ]
+
+mod_final_lm_clean <- lm(sqrt_velos ~ saison + temperature2 + mois + temperature2:mois 
+                         + temperature2:saison + horaire * vacances + temperature2:vacances 
+                         + meteo + meteo:horaire + saison:horaire + humidite + meteo:humidite 
+                         + saison:humidite + vent + vent:meteo, data = train_clean)
+
+summary(mod_final_lm_clean)
+
+cat("MSE of our selected final model with outliers removed:", 
+    calculate_mse(mod_final_lm_clean, test), "\n")
+```
+
+**Comment:**
+
+### Outlier Identification and Removal
+
+To improve model fit, we searched for outliers and influential observations using **Cook's distance**. We identified points with Cook's distance greater than 4/n (where n is the number of observations in our dataset), which helps spot observations having disproportionate impact on the model.
+
+After removing these outliers (influential observations), we adjusted our model (`mod_final_lm_clean`) using the cleaned dataset (`train_clean`). The **MSE** of this cleaned model is almost identical to that of the initial model, showing that the impact of outliers on model performance was low.
+
+However, the **adjusted R²** of the cleaned model increased significantly, indicating better model fit to remaining data. This performance and fit gain confirms that the cleaned model is preferable and constitutes our **selected final model**.
+
+## Model Diagnostics
+
+```{r diagnostics_lm}
+library(ggfortify)
+autoplot(mod_final_lm_clean, 1:4)
+
+set.seed(0)
+durbinWatsonTest(mod_final_lm_clean)
+```
+
+**Comment:**
+
+### Verification of Linear Model Assumptions
+
+To verify basic assumptions of the linear model, we use several graphs and tests applied to model residuals. Here's how each assumption is verified:
+
+1. **[P1] - Mean of residuals centered around 0:**  
+   The first graph verifies that the mean of residuals is close to zero. As the blue line is almost horizontal and close to zero, with residuals uniformly distributed around this line, we can validate the assumption that the mean of residuals is centered around zero.
+
+2. **[P2] - Homoscedasticity of residuals:**  
+   The second graph shows that the blue line is roughly horizontal and close to zero. Residuals are distributed relatively uniformly around this line, indicating that the assumption of homoscedasticity (constant variance of residuals) is validated.
+
+3. **[P3] - Absence of residual correlation (Durbin-Watson test):**  
+   The Durbin-Watson test gives a p-value greater than 0.05, meaning we do not reject the null hypothesis (H0), suggesting that residuals are not autocorrelated.
+
+4. **[P4] - Normality of residuals:**  
+   The fourth graph, which evaluates normality of residuals, shows that points approximately follow a straight line. Small deviations from this line are tolerated, but overall, residuals appear to follow a normal distribution, validating the normality assumption.
+
+In summary, assumptions P1, P2 and P4 are validated by our graphs and tests, while assumption P3 is also validated through the Durbin-Watson test which shows absence of correlation between residuals.
+
+## Testing Centered Variables
+
+```{r centered_variables_lm}
+# Center certain continuous variables
+train_centre <- train
+train_centre$temperature2 <- train_centre$temperature2 - mean(train_centre$temperature2, na.rm = TRUE)
+train_centre$humidite <- train_centre$humidite - mean(train_centre$humidite, na.rm = TRUE)
+train_centre$vent <- train_centre$vent - mean(train_centre$vent, na.rm = TRUE)
+
+mod2_centre <- lm(sqrt_velos ~ saison + temperature2 + mois + temperature2:mois 
+                  + temperature2:saison + horaire * vacances + temperature2:vacances 
+                  + meteo + meteo:horaire + saison:horaire + humidite + meteo:humidite 
+                  + saison:humidite + vent + vent:meteo, data = train_centre)
+
+cat("MSE of our selected final model with centered continuous variables:", 
+    calculate_mse(mod2_centre, test), "\n")
+```
+
+**Comment:**
+
+### Effect of Centering Continuous Variables
+
+We decided to center certain continuous variables, namely feels-like temperature (`temperature2`), humidity (`humidite`) and wind speed (`vent`), by subtracting the mean of each variable in the training dataset. This method is often used to improve model convergence and reduce multicollinearity between variables.
+
+However, after applying this transformation, we found that the **MSE** of the final model (`mod2_centre`) on test data increases considerably compared to the original model. Moreover, the **adjusted R²** also decreased, suggesting that centering did not improve model performance and even deteriorated its prediction capacity.
+
+Thus, although centering can be useful in some cases, here it does not improve model results and could even harm performance, suggesting that this approach is not necessarily a good idea for this particular dataset.
+
+# Part 2: Generalized Linear Model (GLM) Approach
+
+## Initial GLM Model
+
+```{r initial_glm}
+# Create dataset copy for GLM
+velo <- train
+
+# Initial GLM model with all variables
+mod1 <- glm(velos ~ saison + mois + jour_mois + jour_semaine + horaire + 
+            jour_travail + vacances + meteo + humidite + vent + temperature1 + 
+            temperature2, data = velo)
+
+summary(mod1)
+cat("MSE of initial GLM model:", calculate_mse(mod1, test), "\n")
+```
+
+## Outlier Detection Using Studentized Residuals
+
+```{r outliers_glm}
+# Calculate studentized residuals
+velo$resid_student <- rstudent(mod1)
+
+# Identify outliers (|residual| > 3)
+outliers <- which(abs(velo$resid_student) > 3)
+
+# Remove outliers
+velo_clean1 <- velo[-outliers, ]
+
+# Refit model without outliers
+mod1_clean <- glm(velos ~ saison + mois + jour_mois + jour_semaine + horaire + 
+                  jour_travail + vacances + meteo + humidite + vent + temperature1 + 
+                  temperature2, data = velo_clean1)
+
+summary(mod1_clean)
+cat("MSE after removing outliers:", calculate_mse(mod1_clean, test), "\n")
+```
+
+We keep the model with studentized residuals for outlier removal.
+
+## Testing Temperature Variables
+
+Let's analyze the interest of temperature1 and temperature2 simultaneously on the model:
+
+```{r temp_testing_glm}
+# Consider model with only intercept
+mod0_clean <- glm(velos ~ 1, data = velo_clean1)
+
+# Models with individual temperature variables
+mod3_clean <- glm(velos ~ saison + mois + jour_mois + jour_semaine + horaire + 
+                  meteo + humidite + vent + temperature1, data = velo_clean1)
+
+mod4_clean <- glm(velos ~ saison + mois + jour_mois + jour_semaine + horaire + 
+                  meteo + humidite + vent + temperature2, data = velo_clean1)
+
+# Likelihood ratio tests
+lrtest(mod3_clean, mod1_clean)
+lrtest(mod4_clean, mod1_clean)
+```
+
+In both cases we reject H0, so we prefer to keep the model with both temperature1 and temperature2.
+
+## Creating Average Temperature Variable
+
+Here I created a new variable: temperature. It's the average between temperature1 and temperature2, i.e., the average between average temperature and feels-like temperature. This variable may be important as it represents the middle ground between these quantities (temperature1 and temperature2). Let's verify if this variable is of interest in our model.
+
+To compare these models, we can use the LRstats() function from the vcdExtra package, which provides an asymptotic deviance goodness-of-fit test to verify if a model of a certain size is adequate to explain the data.
+
+```{r avg_temp_glm}
+velo_clean1$temperature <- (velo_clean1$temperature2 + velo_clean1$temperature1) / 2
+test$temperature <- (test$temperature2 + test$temperature1) / 2
+
+mod5_clean <- glm(velos ~ saison + mois + jour_mois + jour_semaine + horaire + 
+                  meteo + humidite + vent + temperature, data = velo_clean1)
+
+cat("MSE with average temperature:", calculate_mse(mod5_clean, test), "\n")
+
+LRstats(mod5_clean, mod1_clean, mod0_clean)
+```
+
+The mod1_clean model is best according to AIC, as it has the lowest value. If we prefer a more penalizing approach for complexity, mod5_clean might be preferred, but the BIC difference is not very marked.
+
+So we choose mod1_clean.
+
+## Creating Polynomial Temperature Features
+
+```{r polynomial_temp_glm}
+velo_clean1 <- velo_clean1 %>%
+  mutate(temp1_sq = temperature1^4)
+velo_clean1 <- velo_clean1 %>%
+  mutate(temp_sq = temperature^4)
+test <- test %>%
+  mutate(temp1_sq = temperature1^4)
+test <- test %>%
+  mutate(temp_sq = temperature^4)
+```
+
+## Final GLM Model with Interactions
+
+To arrive at the final model (mod_final_glm), we followed an iterative approach based on rigorous statistical tests to select relevant variables and interactions.
+
+First, I used the Type I test, which allows verifying if each variable added to the model brings real value. This test helped me keep only variables that significantly explained variations in the data. Then, I explored possible interactions between variables. To verify if these interactions really improved the model, I used the LRstats() function from the vcdExtra package. This test, based on deviance, compares a model with and without an interaction to see if it's useful. Finally, I used the lrtest (likelihood ratio test) from the lmtest package to compare different models. This test allowed me to choose the model that explained the data well while remaining simple, by eliminating variables or interactions that weren't necessary.
+
+Through these steps, I obtained a final model that accounts for main variables, such as weather, temperature and time slots, but also important interactions, such as horaire:mois, meteo:saison, or humidite:temperature, to better understand factors influencing bike usage.
+
+```{r final_glm}
+mod_final_glm <- glm(velos ~ saison + mois + jour_travail + horaire + meteo + 
+                     humidite + vent + temperature + horaire:meteo + horaire:mois + 
+                     meteo:mois + meteo:temp_sq + jour_semaine:temperature + 
+                     jour_semaine:humidite + jour_mois:jour_semaine + meteo:saison + 
+                     saison:temperature + saison:humidite + horaire:temperature + 
+                     jour_travail:temperature + saison:jour_mois + 
+                     temperature:humidite, data = velo_clean1)
+
+cat("MSE of final GLM model:", calculate_mse(mod_final_glm, test), "\n")
+```
+
+## Verification of Selected Interactions
+
+From graphs and interpretations written under these graphs in the "data visualization" part, the explained variables are:
+- saison: Graph 19
+- mois: Graph 3
+- jour_travail: Graph 8
+- temperature: Graphs 1 and 2
+- humidite: Graph 6
+- vent: Graph 7
+
+Interactions:
+- horaire and meteo
+- jour_travail and temperature: Graph 8
+- meteo and temperature: Graph 9
+- saison and temperature: Graph 10
+- temperature and mois: Graph 11
+- temperature and horaire: Graph 12
+- horaire and meteo: Graph 13
+- horaire and mois: Graph 14
+- meteo and mois: Graph 15
+- meteo and saison: Graph 16
+- temperature and humidite: Graph 17
+- saison and humidite: Graph 18
+
+Variables not chosen:
+- jour_semaine: Graph 4
+- jour_mois: Graph 5
+
+To analyze other interactions, we'll perform lrtest tests:
+
+```{r verify_interactions_glm}
+# Test interaction: jour_mois:jour_semaine
+mod_try1 <- glm(velos ~ saison + mois + jour_travail + horaire + meteo + humidite + 
+                vent + temperature + horaire:meteo + horaire:mois + meteo:mois + 
+                humidite:temperature + meteo:temp_sq + jour_semaine:temperature + 
+                jour_semaine:humidite + meteo:saison + saison:temperature + 
+                saison:humidite + horaire:temperature + jour_travail:temperature + 
+                saison:jour_mois, data = velo_clean1)
+
+cat("MSE without jour_mois:jour_semaine:", calculate_mse(mod_try1, test), "\n")
+lrtest(mod_try1, mod_final_glm)
+```
+
+So we reject H0, concluding that "jour_mois:jour_semaine" is of interest.
+
+```{r verify_interaction2_glm}
+# Test interaction: jour_semaine:humidite
+mod_try2 <- glm(velos ~ saison + mois + jour_travail + horaire + meteo + humidite + 
+                vent + temperature + horaire:meteo + horaire:mois + meteo:mois + 
+                humidite:temperature + meteo:temp_sq + jour_semaine:temperature + 
+                jour_mois:jour_semaine + meteo:saison + saison:temperature + 
+                saison:humidite + horaire:temperature + jour_travail:temperature + 
+                saison:jour_mois, data = velo_clean1)
+
+cat("MSE without jour_semaine:humidite:", calculate_mse(mod_try2, test), "\n")
+lrtest(mod_try2, mod_final_glm)
+```
+
+So we reject H0, concluding that "jour_semaine:humidite" is of interest, which coincides with the MSE increase when we remove this variable.
+
+```{r verify_interaction3_glm}
+# Test interaction: jour_semaine:temperature
+mod_try3 <- glm(velos ~ saison + mois + jour_travail + horaire + meteo + humidite + 
+                vent + temperature + horaire:meteo + horaire:mois + meteo:mois + 
+                humidite:temperature + meteo:temp_sq + jour_semaine:humidite + 
+                jour_mois:jour_semaine + meteo:saison + saison:temperature + 
+                saison:humidite + horaire:temperature + jour_travail:temperature + 
+                saison:jour_mois, data = velo_clean1)
+
+cat("MSE without jour_semaine:temperature:", calculate_mse(mod_try3, test), "\n")
+lrtest(mod_try3, mod_final_glm)
+```
+
+So we reject H0, concluding that "jour_semaine:temperature" is of interest, which coincides with the MSE increase when we remove this variable.
+
+## Final GLM Model ANOVA
+
+```{r anova_final_glm}
+anova(mod_final_glm, test="Chisq")
+```
+
+# Model Comparison and Conclusions
+
+```{r final_comparison}
+cat("\n=== FINAL MODEL COMPARISON ===\n\n")
+
+cat("Linear Model (LM) with sqrt transformation:\n")
+cat("  MSE:", calculate_mse(mod_final_lm_clean, test), "\n")
+cat("  Adjusted R²:", summary(mod_final_lm_clean)$adj.r.squared, "\n\n")
+
+cat("Generalized Linear Model (GLM):\n")
+cat("  MSE:", calculate_mse(mod_final_glm, test), "\n")
+cat("  AIC:", AIC(mod_final_glm), "\n")
+cat("  BIC:", BIC(mod_final_glm), "\n\n")
+
+cat("Both models show strong predictive performance.\n")
+cat("The LM approach uses transformation to meet normality assumptions.\n")
+cat("The GLM approach directly models the count data without transformation.\n")
+```
+
+# Summary
+
+This analysis explored two complementary approaches to modeling bike-sharing demand:
+
+1. **Linear Model (LM) Approach:**
+   - Applied square root transformation to target variable for normality
+   - Used stepwise selection and Type 2 ANOVA for variable selection
+   - Verified all linear model assumptions
+   - Final model includes main effects and key interactions
+   - Strong performance with good R² and low MSE
+
+2. **Generalized Linear Model (GLM) Approach:**
+   - Modeled count data directly without transformation
+   - Used likelihood ratio tests for model selection
+   - Included polynomial terms and comprehensive interactions
+   - Identified outliers using studentized residuals
+   - Excellent predictive performance
+
+**Key Findings:**
+- Temperature (both actual and feels-like) is a major predictor
+- Strong seasonal and monthly effects on rentals
+- Time of day significantly impacts usage patterns
+- Weather conditions critically influence demand
+- Numerous meaningful interactions between variables
+
+**Model Selection:**
+Both approaches provide valid solutions. The LM approach offers interpretability through familiar linear regression diagnostics, while the GLM approach naturally handles count data without transformation. The choice depends on specific use case requirements.
+
+**Practical Applications:**
+These models can help bike-sharing operators:
+- Optimize bike distribution across stations
+- Plan maintenance schedules
+- Predict demand for capacity planning
+- Understand user behavior patterns
+- Make data-driven operational decisions
