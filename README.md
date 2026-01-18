@@ -1,7 +1,6 @@
 # Bike Sharing Demand Analysis
 
 [![R](https://img.shields.io/badge/R-276DC3?style=flat&logo=r&logoColor=white)](https://www.r-project.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A comprehensive statistical analysis of bike-sharing demand using Linear Models (LM) and Generalized Linear Models (GLM). This project explores how weather conditions, temporal factors, and their interactions influence bike rental patterns.
 
