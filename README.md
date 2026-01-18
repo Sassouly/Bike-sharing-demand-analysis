@@ -254,10 +254,6 @@ This analysis can help bike-sharing operators:
 - **F-tests**: Overall model significance
 
 
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
 ## Acknowledgments
 
 - Data source: Bike-sharing system historical records
